@@ -1,0 +1,3 @@
+CREATE DATABASE dockhand;
+CREATE DATABASE authentik;
+CREATE DATABASE netbird;
