@@ -1,0 +1,111 @@
+networks:
+  proxy_net:
+    external: true
+  vpn_net:
+    name: vpn_net
+    driver: bridge
+
+services:
+
+  # ── NetBird Dashboard ──────────────────────────────────────────────────────
+  dashboard:
+    image: netbirdio/dashboard:latest
+    container_name: netbird-dashboard
+    restart: unless-stopped
+    environment:
+      - AUTH_AUTHORITY=${NETBIRD_AUTH_AUTHORITY}
+      - AUTH_CLIENT_ID=${NETBIRD_AUTH_CLIENT_ID}
+      - AUTH_AUDIENCE=${NETBIRD_AUTH_CLIENT_ID}
+      - AUTH_SUPPORTED_SCOPES=openid profile email offline_access api
+      - AUTH_USE_PKCE=true
+      - USE_AUTH0=false
+      - NETBIRD_MGMT_API_ENDPOINT=https://netbird.${DOMAIN}
+      - NETBIRD_MGMT_GRPC_API_ENDPOINT=https://netbird.${DOMAIN}
+    networks:
+      - proxy_net
+      - vpn_net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy_net"
+      # Catch-all for netbird.ktown.gg — lowest priority so specific path rules win
+      - "traefik.http.routers.netbird-dashboard.rule=Host(`netbird.${DOMAIN}`)"
+      - "traefik.http.routers.netbird-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.netbird-dashboard.tls=true"
+      - "traefik.http.routers.netbird-dashboard.tls.certresolver=desec"
+      - "traefik.http.routers.netbird-dashboard.service=netbird-dashboard-svc"
+      - "traefik.http.routers.netbird-dashboard.priority=1"
+      - "traefik.http.services.netbird-dashboard-svc.loadbalancer.server.port=80"
+
+  # ── NetBird Server (Management + Signal combined) ─────────────────────────
+  netbird-server:
+    image: netbirdio/management:latest
+    container_name: netbird-server
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/05-vpn/data/management:/var/lib/netbird
+      - ${BASE_DIR}/05-vpn/config.json:/etc/netbird/config.json:ro
+    command:
+      - --port=80
+      - --log-file=console
+      - --log-level=info
+      - --disable-anonymous-metrics=true
+      - --single-account-mode-domain=${DOMAIN}
+      - --dns-domain=netbird.selfhosted
+    depends_on:
+      - dashboard
+    networks:
+      - proxy_net
+      - vpn_net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy_net"
+
+      # ── Management REST API (HTTP/1.1) ────────────────────────────────────
+      - "traefik.http.routers.netbird-api.rule=Host(`netbird.${DOMAIN}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.netbird-api.entrypoints=websecure"
+      - "traefik.http.routers.netbird-api.tls=true"
+      - "traefik.http.routers.netbird-api.tls.certresolver=desec"
+      - "traefik.http.routers.netbird-api.service=netbird-api-svc"
+      - "traefik.http.routers.netbird-api.priority=20"
+      - "traefik.http.services.netbird-api-svc.loadbalancer.server.port=80"
+
+      # ── Signal gRPC (h2c — TLS terminated at Traefik) ─────────────────────
+      - "traefik.http.routers.netbird-signal.rule=Host(`netbird.${DOMAIN}`) && PathPrefix(`/signalexchange.SignalExchange`)"
+      - "traefik.http.routers.netbird-signal.entrypoints=websecure"
+      - "traefik.http.routers.netbird-signal.tls=true"
+      - "traefik.http.routers.netbird-signal.tls.certresolver=desec"
+      - "traefik.http.routers.netbird-signal.service=netbird-signal-svc"
+      - "traefik.http.routers.netbird-signal.priority=20"
+      - "traefik.http.services.netbird-signal-svc.loadbalancer.server.scheme=h2c"
+      - "traefik.http.services.netbird-signal-svc.loadbalancer.server.port=80"
+
+      # ── Management gRPC (h2c — TLS terminated at Traefik) ────────────────
+      - "traefik.http.routers.netbird-mgmt.rule=Host(`netbird.${DOMAIN}`) && PathPrefix(`/management.ManagementService`)"
+      - "traefik.http.routers.netbird-mgmt.entrypoints=websecure"
+      - "traefik.http.routers.netbird-mgmt.tls=true"
+      - "traefik.http.routers.netbird-mgmt.tls.certresolver=desec"
+      - "traefik.http.routers.netbird-mgmt.service=netbird-mgmt-svc"
+      - "traefik.http.routers.netbird-mgmt.priority=20"
+      - "traefik.http.services.netbird-mgmt-svc.loadbalancer.server.scheme=h2c"
+      - "traefik.http.services.netbird-mgmt-svc.loadbalancer.server.port=80"
+
+  # ── NetBird Proxy (coturn — STUN/TURN relay for WireGuard) ───────────────
+  # UDP relay traffic cannot pass through Traefik, so coturn uses host networking
+  # and binds directly to the host NIC. No Traefik labels needed here.
+  netbird-proxy:
+    image: coturn/coturn:latest
+    container_name: netbird-proxy
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --min-port=49152
+      - --max-port=65535
+      - --realm=${DOMAIN}
+      - --no-software-attribute
+      - --no-tls
+      - --no-dtls
+      - --listening-ip=0.0.0.0
+      - --external-ip=${NETBIRD_TURN_EXTERNAL_IP}
+      - --user=${NETBIRD_TURN_USER}:${NETBIRD_TURN_PASSWORD}
