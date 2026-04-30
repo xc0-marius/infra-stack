@@ -1,9 +1,6 @@
 networks:
   proxy_net:
     external: true
-  vpn_net:
-    name: vpn_net
-    driver: bridge
 
 services:
 
@@ -23,7 +20,6 @@ services:
       - NETBIRD_MGMT_GRPC_API_ENDPOINT=https://netbird.${DOMAIN}
     networks:
       - proxy_net
-      - vpn_net
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy_net"
@@ -55,7 +51,6 @@ services:
       - dashboard
     networks:
       - proxy_net
-      - vpn_net
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy_net"
